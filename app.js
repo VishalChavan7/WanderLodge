@@ -1,80 +1,109 @@
+// app.js
 const express = require("express");
-const app = express();
-const port = 8080;
-const mongoose = require("mongoose");
 const path = require("path");
 const methodOverride = require("method-override");
 const ejsMate = require("ejs-mate");
-const ExpressError = require("./utils/ExpressError.js");
-const cookieParser = require("cookie-parser");
+const mongoose = require("mongoose");
 const session = require("express-session");
 const MongoStore = require("connect-mongo");
 const flash = require("connect-flash");
 const passport = require("passport");
 const LocalStrategy = require("passport-local");
+const ExpressError = require("./utils/ExpressError.js");
 const User = require("./models/user.js");
-if (process.env.NODE_ENV != "production") {
+
+// Load .env only in non-production (Vercel provides envs in prod)
+if (process.env.NODE_ENV !== "production") {
   require("dotenv").config();
 }
 
-const listingRouter = require("./routes/listing.js");
-const reviewRouter = require("./routes/review.js");
-const userRouter = require("./routes/user.js");
+const app = express();
 
-app.use(express.urlencoded({ extended: true }));
-app.use(methodOverride("_method"));
+/* --------------------------- MongoDB Connection --------------------------- */
+/**
+ * Serverless-safe Mongo connection (singleton).
+ * Prevents creating a new connection on each Vercel invocation.
+ */
+const dbUrl = process.env.ATLASDB_URL;
+if (!dbUrl) {
+  console.warn(
+    "⚠️  ATLASDB_URL is not set. Set it in your environment variables."
+  );
+}
+
+let cached = global.__mongooseConn;
+if (!cached) {
+  cached = global.__mongooseConn = { conn: null, promise: null };
+}
+
+async function connectDB() {
+  if (cached.conn) return cached.conn;
+  if (!cached.promise) {
+    cached.promise = mongoose
+      .connect(dbUrl, {
+        maxPoolSize: 5,
+        serverSelectionTimeoutMS: 10000,
+      })
+      .then((m) => m);
+  }
+  cached.conn = await cached.promise;
+  return cached.conn;
+}
+
+connectDB()
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch((err) => console.error("❌ Mongo connection error:", err));
+
+/* ------------------------------ App Settings ----------------------------- */
 app.engine("ejs", ejsMate);
-
 app.set("view engine", "ejs");
 app.set("views", path.join(__dirname, "views"));
 app.use(express.static(path.join(__dirname, "public")));
 
-const dbUrl = process.env.ATLASDB_URL;
+app.use(express.urlencoded({ extended: true }));
+app.use(express.json());
+app.use(methodOverride("_method"));
 
-async function main() {
-  await mongoose.connect(dbUrl);
-}
+// Behind Vercel proxy; enables secure cookies when NODE_ENV=production
+app.set("trust proxy", 1);
 
-main()
-  .then(() => {
-    console.log("Connection Successful");
-  })
-  .catch((err) => console.log(err));
-
-const store = MongoStore.create({
+/* --------------------------------- Session -------------------------------- */
+const sessionStore = MongoStore.create({
   mongoUrl: dbUrl,
-  crypto: {
-    secret: process.env.SECRET,
-  },
-  touchAfter: 24 * 3600,
+  crypto: { secret: process.env.SECRET },
+  touchAfter: 24 * 3600, // seconds
 });
 
-store.on("error", () => {
-  console.log("ERROR in MONGO SESSION STORE", err);
+sessionStore.on("error", (err) => {
+  console.error("❌ Mongo session store error:", err);
 });
 
-const sessionOption = {
-  store,
-  secret: process.env.SECRET,
+const sessionOptions = {
+  store: sessionStore,
+  secret: process.env.SECRET || "fallback-secret", // set SECRET in env
   resave: false,
-  saveUninitialized: true,
+  saveUninitialized: false,
   cookie: {
-    expires: Date.now() + 7 * 24 * 60 * 60 * 1000,
-    maxAge: 7 * 24 * 60 * 60 * 1000,
     httpOnly: true,
+    // one week
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    // secure cookies in production (Vercel)
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
   },
 };
 
-app.use(session(sessionOption));
+app.use(session(sessionOptions));
 app.use(flash());
 
+/* -------------------------------- Passport -------------------------------- */
 app.use(passport.initialize());
 app.use(passport.session());
 passport.use(new LocalStrategy(User.authenticate()));
 passport.serializeUser(User.serializeUser());
 passport.deserializeUser(User.deserializeUser());
 
-//Local Variables
+/* ---------------------------- Locals for Views ---------------------------- */
 app.use((req, res, next) => {
   res.locals.success = req.flash("success");
   res.locals.error = req.flash("error");
@@ -82,20 +111,41 @@ app.use((req, res, next) => {
   next();
 });
 
+/* --------------------------------- Routes --------------------------------- */
+const listingRouter = require("./routes/listing.js");
+const reviewRouter = require("./routes/review.js");
+const userRouter = require("./routes/user.js");
+
+app.get("/health", (_req, res) => res.send("OK"));
+
 app.use("/listings", listingRouter);
 app.use("/listings/:id/reviews", reviewRouter);
 app.use("/", userRouter);
 
+// Redirect root URL to /listings
+app.get("/", (req, res) => {
+  res.redirect("/listings");
+});
+
+/* ------------------------------- 404 & Errors ----------------------------- */
 app.all("*", (req, res, next) => {
   next(new ExpressError(404, "Page Not Found"));
 });
 
 app.use((err, req, res, next) => {
-  let { statusCode = 500, message = "Something went wrong" } = err;
+  const { statusCode = 500 } = err;
+  const message = err.message || "Something went wrong";
   res.status(statusCode).render("error.ejs", { message });
-  // res.status(statusCode).send(message);
 });
 
-app.listen(port, () => {
-  console.log(`Listening to port port`);
-});
+/* -------------------- Local Dev: start only if direct run ------------------ */
+// For Vercel: we export the app (no app.listen here).
+// For local dev: `node app.js` will start the server, or use `node server.js`.
+if (require.main === module) {
+  const port = process.env.PORT || 8080;
+  app.listen(port, () => {
+    console.log(`🚀 Server running at http://localhost:${port}`);
+  });
+}
+
+module.exports = app;

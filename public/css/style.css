@@ -257,3 +257,19 @@ footer {
 .map {
   border-radius: 1rem;
 }
+
+/* === Uniform Listing Images === */
+.img-card {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+
+.img-card img {
+  width: 100%;
+  max-width: 500px; /* adjust as per your layout */
+  height: 600px; /* fixed uniform height */
+  object-fit: cover; /* crops edges while preserving aspect ratio */
+  border-radius: 12px; /* optional for smooth corners */
+  box-shadow: 0 4px 10px rgba(0, 0, 0, 0.1);
+}
